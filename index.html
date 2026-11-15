@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ASCII Christmas Tree</title>
+<style>
+  :root { --bg: #04070d; --line: #1b2433; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0a0e15; color: #cbd5e1; font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace; overflow: hidden; }
+  .win { position: fixed; inset: 0; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); touch-action: none; -webkit-user-select: none; user-select: none; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
+  .stage { position: relative; flex: 1; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="stage" id="stage">
+    <canvas id="c"></canvas>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ---------------- config ---------------- */
+let DIST = 11;                      // camera distance (larger on portrait = flatter perspective)
+const FPS = 30, MESSAGE = "MERRY CHRISTMAS 2026";
+const qs = new URLSearchParams(location.search);
+const SPEED = 0.3107;               // rad/s (= 17.8 deg/s)
+const WISH = (new URLSearchParams(location.search).get("wish")) || "Chúc bé iu giáng sinh an lành";
+const WISH_T = 12.6;                // when the star-wish starts (after the tree is complete)
+const FONT_FAMILY = '"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace';
+
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const stage = document.getElementById("stage");
+
+/* ---------------- deterministic rng ---------------- */
+function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+const R = rng(2026);
+
+/* ---------------- 3D model ---------------- */
+const K = { LEAF: 0, ORN: 1, GARLAND: 2, TRUNK: 3, GBLUE: 4, GRED: 5, STAR: 6, LIGHT: 7, RAY: 8, SNOW: 9 };
+const P = [], BAUBLES = [];                       // {x,y,z,nx,nz,k,c,o,j,h}
+const add = (x, y, z, k, c = 0, nx = 0, nz = 0, o = 0) => P.push({ x, y, z, k, c, nx, nz, o, j: R(), h: Math.max(0, Math.min(1, (y / VS - 0.2) / 5.8)) });
+const VS = 1.5, CY = 3 * VS;        // vertical stretch of the tree (+50% taller) and its screen-centre height
+const TAU = Math.PI * 2, DENS = innerWidth < 700 ? 0.7 : 1;
+
+const ORN_COLORS = ["#ff3b3b", "#ffd23f", "#ff8a00", "#ff4fd8", "#35d4ff", "#e8eefc", "#7c5cff", "#3dff9a"];
+const LIGHT_COLORS = ["#ff4b4b", "#ffe14a", "#4aa8ff", "#ff6bd6", "#6dff9a", "#ffffff"];
+
+// foliage tiers: [yBottom, yTop, radius]
+const TIERS = [[0.2, 1.9, 2.95], [0.9, 2.7, 2.6], [1.7, 3.4, 2.25], [2.5, 4.1, 1.9], [3.3, 4.8, 1.5], [4.1, 5.5, 1.05], [4.8, 6.0, 0.65]];
+// each tier flares out into a skirt near its lower edge; f = 0 (apex) .. 1 (rim)
+const prof = (f) => f * (1 + 0.3 * Math.pow(Math.max(0, (f - 0.68) / 0.32), 2));
+const treeR = (y) => { let m = 0; for (const [b, t, r] of TIERS) if (y >= b && y <= t) m = Math.max(m, r * prof((t - y) / (t - b))); return m + 0.04; };
+
+TIERS.forEach(([b, t, r], i) => {
+  const nb = Math.round(9 + r * 3.5), n = Math.floor((10000 * (r / 3) + 2000) * DENS * 1.3), H = t - b;
+  const phase = R() * TAU;
+  for (let k = 0; k < n; k++) {
+    const u = R();
+    let f, a, o = 0, c = (R() * 5) | 0;
+    if (u < 0.72) {                                      // needles clustered on radial branches
+      const bi = (R() * nb) | 0;
+      f = Math.pow(R(), 0.62);
+      a = phase + (bi / nb) * TAU + (R() + R() + R() - 1.5) * (TAU / nb) * 0.5 * (1.15 - f * 0.4);
+    } else {                                             // interior filler
+      f = Math.sqrt(R()) * 0.92; a = R() * TAU;
+    }
+    let rad = r * prof(f);
+    if (f > 0.5) rad *= 1 + 0.16 * Math.pow(Math.max(0, Math.cos(nb * (a - phase))), 1.5) * (f - 0.5) / 0.5;   // branch tips reach further
+    if (f > 0.86 && R() < 0.22) { rad *= 1.04 + R() * 0.1; o = 1; }          // loose needle fringe
+    else if (f > 0.5 && R() < 0.06) { o = 2; }                               // snow on the branch
+    const y = t - f * H - 0.28 * f * f * f * H + (o === 2 ? 0.03 : 0);
+    const nx = Math.cos(a), nz = Math.sin(a);
+    add(rad * nx, y * VS, rad * nz, K.LEAF, c, nx, nz, o);
+    const q = P[P.length - 1], bPrev = i > 0 ? TIERS[i - 1][0] : -9;
+    if (i > 0 && y < bPrev && y > bPrev - 0.55) q.sh = 1;        // shadow cast by the tier above
+    else if (f > 0.9) q.rim = 1;                                  // lit rim of this tier's skirt
+  }
+  // baubles: small shaded spheres
+  const ng = Math.round((30 + i * 7) * 1.35);
+  for (let k = 0; k < ng; k++) {
+    const f = 0.28 + R() * 0.66, y = t - f * H - 0.28 * f * f * f * H - 0.1, a = R() * TAU, rr = r * prof(f) + 0.04;
+    const cxp = rr * Math.cos(a), czp = rr * Math.sin(a), rb = 0.1 + Math.pow(R(), 1.5) * 0.12;
+    const col = ORN_COLORS[(R() * ORN_COLORS.length) | 0], og = R();
+    BAUBLES.push({ x: cxp, y: y * VS, z: czp, r: rb, col, o: og });
+    for (let q = 0, nq = Math.round(40 + rb * 420); q < nq; q++) {
+      let dx = R() * 2 - 1, dy = R() * 2 - 1, dz = R() * 2 - 1; const L = Math.hypot(dx, dy, dz) || 1; dx /= L; dy /= L; dz /= L;
+      add(cxp + dx * rb, y * VS + dy * rb, czp + dz * rb, K.ORN, col, dx, dz, og);
+    }
+    add(cxp, y * VS + rb + 0.04, czp, K.ORN, "#f5c451", 0, 0, og);    // cap
+  }
+});
+// two spiral garlands (gold + silver beads)
+[[0, 10, 1], [1, 8, -1]].forEach(([kind, turns, dir]) => {
+  const N = Math.round(1800 * DENS);
+  for (let i = 0; i < N; i++) {
+    const f = i / N, y = 5.8 - f * 5.4, r = treeR(y) * 1.07 + 0.03, a = dir * f * TAU * turns + kind * 2.4;
+    for (const dy of [-0.045, 0, 0.045]) add(r * Math.cos(a), y * VS + dy + Math.sin(f * 90) * 0.02, r * Math.sin(a), K.GARLAND, kind, Math.cos(a), Math.sin(a), f);
+  }
+});
+// lights
+const LIGHT_N = 420;
+for (let i = 0; i < LIGHT_N; i++) {
+  const f = 0.03 + Math.sqrt(R()) * 0.93, y = 5.9 - f * 5.6, r = treeR(y) * 1.08 + 0.06, a = R() * TAU;
+  add(r * Math.cos(a), y * VS, r * Math.sin(a), K.LIGHT, i % LIGHT_COLORS.length, Math.cos(a), Math.sin(a), i / LIGHT_N);
+}
+// trunk with root flare + bark texture
+for (let i = 0; i < 900; i++) {
+  const a = R() * TAU, y = 0.5 - R() * 1.5, flare = y < -0.5 ? (-0.5 - y) * 0.35 : 0;
+  add((0.4 + flare) * Math.cos(a), y, (0.4 + flare) * Math.sin(a), K.TRUNK, 0, Math.cos(a), Math.sin(a));
+}
+// gifts (with ribbons and bows)
+function box(cx, cz, w, h, kind, ts) {
+  for (let i = 0; i < 800; i++) {
+    const face = (R() * 5) | 0; let x = (R() - .5) * w, z = (R() - .5) * w, y = R() * h - 1.0;
+    if (face === 0) x = -w / 2; else if (face === 1) x = w / 2; else if (face === 2) z = -w / 2; else if (face === 3) z = w / 2; else y = h - 1.0;
+    const ribbon = Math.abs(x) < 0.07 || Math.abs(z) < 0.07;
+    add(cx + x, y, cz + z, kind, ribbon ? 1 : 0, x === -w / 2 ? -1 : x === w / 2 ? 1 : 0, z === -w / 2 ? -1 : z === w / 2 ? 1 : 0, ts);
+  }
+  for (let i = 0; i < 160; i++) {                        // bow: two loops + knot
+    const side = i % 2 ? 1 : -1, a = R() * TAU, bx = side * 0.17 + Math.cos(a) * 0.12, by = Math.abs(Math.sin(a)) * 0.15;
+    add(cx + bx, h - 1.0 + 0.05 + by, cz + Math.sin(a) * 0.04, kind, 1, side, 0, ts);
+  }
+}
+box(-3.3, 0.7, 1.0, 1.1, K.GBLUE, 13.6);
+box(3.1, -0.2, 1.0, 1.15, K.GRED, 10.6);
+box(-1.8, 2.8, 0.8, 0.7, K.GRED, 11.3);
+box(2.0, 2.6, 0.8, 0.75, K.GBLUE, 12.4);
+box(1.2, -2.4, 0.7, 0.6, K.GRED, 12.9);
+// snow ground
+for (let i = 0; i < 3200; i++) {
+  const a = R() * TAU, r = 4.9 * Math.sqrt(R());
+  add(r * Math.cos(a), -1.02 + Math.sin(a * 3 + r) * 0.04, r * Math.sin(a), K.SNOW, 0, 0, 0, R());
+}
+// star (outline + fill, with thickness) + rays
+for (let i = 0; i < 700; i++) {
+  const a = R() * TAU, k = Math.sqrt(R()), edge = 0.17 + 0.25 * Math.pow(Math.abs(Math.cos(2.5 * a)), 0.7);
+  add(edge * k * Math.cos(a), 6.28 * VS + edge * k * Math.sin(a), (R() - .5) * 0.2, K.STAR, k > 0.8 ? 2 : k < 0.45 ? 0 : 1);
+}
+for (let r = 0; r < 12; r++) {
+  const a = (r / 12) * TAU + 0.13, len = r % 2 ? 16 : 24;
+  for (let i = 2; i < len; i++) add(Math.cos(a) * i * 0.08, 6.28 * VS + Math.sin(a) * i * 0.08, 0, K.RAY, r % 2, 0, 0, i / len);
+}
+
+/* ---------------- palette ---------------- */
+const LEAF_CHARS = "·:+x%&#W8$@";
+const leafPal = [];                  // [variant][level 0..11]
+for (let v = 0; v < 5; v++) { leafPal[v] = []; for (let l = 0; l < 12; l++) leafPal[v][l] = `hsl(${118 + v * 6 - (l > 9 ? 14 : 0)} ${55 + l * 2}% ${14 + l * 3.6}%)`; }
+const GIFT_BLUE = ["#2d6bff", "#cfe0ff"], GIFT_RED = ["#e11d2e", "#ffd2d2"];
+
+/* ---------------- layout / buffers ---------------- */
+let DPR, W, H, cw, ch, cols, rows, fs;
+let zb, chB, coB, lightAt, bg;
+let wish = [], WISH_Y = 0;
+const SPR = ["#ffffff", "#ffe9a0", "#ffd0e8", "#bfe3ff"].map((c) => {          // pre-rendered glow sprites
+  const k = document.createElement("canvas"); k.width = k.height = 32; const g = k.getContext("2d");
+  const gr = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+  gr.addColorStop(0, "#ffffff"); gr.addColorStop(0.3, c); gr.addColorStop(0.55, c + "70"); gr.addColorStop(1, c + "00");
+  g.fillStyle = gr; g.fillRect(0, 0, 32, 32); return k;
+});
+function buildWish() {
+  const fam = '"Segoe UI", "Helvetica Neue", Arial, sans-serif';
+  const m = document.createElement("canvas").getContext("2d");
+  const fit = (txts, cap) => {                       // biggest font where every line fits the width
+    let f = cap;
+    for (; f > 8; f--) { m.font = `300 ${f}px ${fam}`; if (Math.max(...txts.map((x) => m.measureText(x).width)) <= W * 0.8) break; }
+    return f;
+  };
+  let lines = [WISH], fpx = fit(lines, Math.min(H * 0.075, 80));
+  const words = WISH.split(" ");
+  if (words.length > 1 && fpx < H * 0.06) {          // narrow window: wrap into two bigger lines
+    let best = 1, diff = 1e9;
+    for (let i = 1; i < words.length; i++) {
+      const d = Math.abs(words.slice(0, i).join(" ").length - words.slice(i).join(" ").length);
+      if (d < diff) { diff = d; best = i; }
+    }
+    const l2 = [words.slice(0, best).join(" "), words.slice(best).join(" ")], f2 = fit(l2, Math.min(H * 0.055, 70));
+    if (f2 > fpx) { lines = l2; fpx = f2; }
+  }
+  const lh = Math.round(fpx * 1.3), th = lh * lines.length + 8, tw = Math.ceil(W);
+  const c2 = document.createElement("canvas"); c2.width = tw; c2.height = th;
+  const g = c2.getContext("2d");
+  g.font = `300 ${fpx}px ${fam}`; g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "#fff";
+  lines.forEach((ln, i) => g.fillText(ln, tw / 2, 4 + lh * (i + 0.5)));
+  const data = g.getImageData(0, 0, tw, th).data, step = Math.max(2, Math.round(fpx / 17));
+  const hh = lh * lines.length / 2, c0 = H * (lines.length > 1 ? 0.13 : 0.12);
+  const y0 = hh + 1.5 * Math.max(c0 - hh, H * 0.02) - th / 2;          // top gap +50%
+  const sr = rng(77); wish = [];
+  for (let y = 0; y < th; y += step) for (let x = 0; x < tw; x += step) {
+    if (data[((y | 0) * tw + (x | 0)) * 4 + 3] > 90) {
+      const tx = x + (sr() - .5) * step * 0.4, ty = y0 + y + (sr() - .5) * step * 0.4;
+      wish.push({ tx, ty, d: (tx / tw) * 3 + sr() * 0.5, dur: 1.4 + sr() * 0.6,
+                  cx: W / 2 + (sr() - .5) * W * 0.5, cy: H * (0.1 + sr() * 0.35),
+                  ci: (sr() * 4) | 0, sz: Math.max(0.9, fpx * (0.026 + sr() * 0.026)), ph: sr() * 6.28, big: sr() < 0.12 });
+    }
+  }
+  WISH_Y = y0;
+}
+function layout() {
+  DPR = Math.min(devicePixelRatio || 1, 2);
+  const r = stage.getBoundingClientRect();
+  W = r.width; H = r.height;
+  DIST = W < H ? 22 : 11;
+  cv.width = W * DPR; cv.height = H * DPR;
+  fs = Math.max(5, Math.min(8, Math.round(Math.min(W / 210, H / 105))));
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.font = `${fs}px ${FONT_FAMILY}`; ctx.textBaseline = "top";
+  cw = ctx.measureText("M").width; ch = Math.round(fs * 1.2);
+  cols = Math.floor(W / cw); rows = Math.floor(H / ch);
+  buildWish();
+  zb = new Float32Array(cols * rows); chB = new Array(cols * rows); coB = new Array(cols * rows); lightAt = new Array(cols * rows);
+  // faint dotted background grid
+  bg = document.createElement("canvas"); bg.width = cv.width; bg.height = cv.height;
+  const b = bg.getContext("2d"); b.setTransform(DPR, 0, 0, DPR, 0, 0); b.font = ctx.font; b.textBaseline = "top";
+  for (let y = 0; y < rows; y++) {
+    const lower = y > rows * 0.8;
+    b.fillStyle = lower ? "#1b2638" : "#0f1622";
+    for (let x = 0; x < cols; x++) if ((x + y) % 2 === 0) b.fillText(lower ? "-" : "·", x * cw, y * ch);
+  }
+}
+addEventListener("resize", layout); layout();
+
+/* ---------------- snow (screen space) ---------------- */
+const flakes = Array.from({ length: 260 }, () => ({ x: R(), y: R(), v: 0.012 + R() * 0.035, ph: R() * 6.28, c: ".+*"[(R() * 3) | 0] }));
+
+/* ---------------- render ---------------- */
+const FOV = 1.0, PITCH = 0.2, CP = Math.cos(PITCH), SP = Math.sin(PITCH);
+let t0 = performance.now(), last = 0;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (now - last < 1000 / FPS - 1) return;
+  const dt = (now - last) / 1000; last = now;
+  const t = (now - t0) / 1000, ang = t * SPEED;
+  const prog = (a, b) => clamp((t - a) / (b - a), 0, 1);
+  const ease = (x) => x * x * (3 - 2 * x);
+  const grow = ease(prog(0.4, 6.0)), yS = 0.1 + 0.9 * grow, rS = 0.6 + 0.4 * grow;
+  const colorGrow = prog(1.8, 6.4), seed = prog(0, 0.7);
+  const pOrn = prog(7, 10.5), pGar = prog(7.5, 10), pLit = prog(8, 11.5), pRay = prog(11.3, 12.8);
+  const c = Math.cos(ang), s = Math.sin(ang);
+
+  zb.fill(1e9); chB.fill(null); lightAt.fill(null);
+  const S = Math.min(H * 0.68 / 10.6, W * (DIST > 15 ? 0.47 / 4.8 : 0.44 / 5.2));          // pixels per world unit at the focal plane
+  const ox = W / 2, topB = H * 0.26, botB = H * 0.87;
+  const oy = topB + 4.9 * S + Math.max(0, (botB - topB) - 10.5 * S) / 2;                             // screen position of the tree centre (y = 3)
+  let letters = 0, litNow = 0;
+
+  for (let i = 0; i < P.length; i++) {
+    const p = P[i];
+    // build-up timeline: skip points that have not appeared yet
+    let px = p.x, py = p.y, pz = p.z;
+    switch (p.k) {
+      case K.LEAF: if (p.j > seed) continue; px *= rS; pz *= rS; py *= yS; break;
+      case K.ORN: if (p.o > pOrn) continue; break;
+      case K.GARLAND: if (p.o > pGar) continue; break;
+      case K.LIGHT: if (p.o > pLit) continue; break;
+      case K.STAR: if (t < 11) continue; break;
+      case K.SNOW: if (p.o > prog(4.5, 7.5)) continue; break;
+      case K.RAY: if (p.o > pRay) continue; break;
+      case K.GBLUE: case K.GRED: if (t < p.o) continue; break;
+    }
+    const xr = px * c + pz * s, zr = -px * s + pz * c;
+    const ry = py - CY, yp = ry * CP + zr * SP, zp = zr * CP - ry * SP;
+    const d = DIST + zp; if (d < 1) continue;
+    const k = DIST / d * FOV;
+    const col = Math.floor((ox + xr * k * S) / cw), row = Math.floor((oy - yp * k * S) / ch);
+    if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+    const idx = row * cols + col;
+    if (d >= zb[idx]) continue;
+
+    let chr, color, lc = null;
+    const nxr = p.nx * c + p.nz * s, nzr = -p.nx * s + p.nz * c;
+    const lit = clamp(0.5 - 0.55 * nzr - 0.35 * nxr, 0, 1);
+    switch (p.k) {
+      case K.LEAF: {
+        if (p.h > colorGrow) {             // snow-white growth front
+          chr = "#+*"[(p.j * 3) | 0]; color = lit > 0.45 ? "#ffffff" : "#c9d1e3"; break;
+        }
+        if (p.o === 2) { chr = "*\"'"[(p.j * 3) | 0]; color = lit > 0.4 ? "#f4f8ff" : "#b9c6e2"; break; }      // snow on branch
+        let l = clamp(Math.floor((lit * 0.8 + p.j * 0.35) * 12 - (d - DIST) * 0.25), 0, 11);
+        if (p.sh) l = Math.max(0, l - 5); else if (p.rim) l = Math.min(11, l + 3);
+        if (p.o === 1) { chr = nxr > 0.25 ? "\\" : nxr < -0.25 ? "/" : "|"; color = leafPal[p.c][clamp(l - 2, 0, 11)]; break; }   // needle fringe
+        chr = LEAF_CHARS[clamp(Math.floor(l * 0.9 + p.j * 2), 0, 10)]; color = leafPal[p.c][l]; break;
+      }
+      case K.ORN:
+        if (lit > 0.86) { chr = "*"; color = "#ffffff"; break; }                                           // specular highlight
+        chr = "@Oo0."[clamp(Math.floor((1 - lit) * 4.6), 0, 4)]; color = p.c; break;
+      case K.GARLAND:
+        chr = (i & 1) ? "*" : "o";
+        color = p.c ? (lit > 0.5 ? "#eef3ff" : "#8f9bb8") : (lit > 0.5 ? "#ffe9a0" : "#d4a62a"); break;
+      case K.TRUNK: chr = "|Hl#"[(p.j * 4) | 0]; color = lit > 0.55 ? "#a87444" : lit > 0.3 ? "#6e4623" : "#3f2812"; break;
+      case K.SNOW: chr = ".:-~,'"[(p.j * 6) | 0]; color = (p.j > 0.5 ? lit : lit * 0.6) > 0.35 ? "#dce7fb" : "#7f93bb"; break;
+      case K.GBLUE: case K.GRED: {
+        const pal = p.k === K.GBLUE ? GIFT_BLUE : GIFT_RED;
+        chr = p.c ? "+" : (lit > 0.5 ? "X" : "x"); if (t - p.o < 0.7) { chr = "#"; color = "#ffffff"; break; } color = p.c ? "#ffe9a0" : pal[0]; if (!p.c && lit > 0.65) color = p.k === K.GBLUE ? "#6f9bff" : "#ff5b6a"; break;
+      }
+      case K.STAR: chr = p.c === 1 ? "#" : "@"; color = p.c === 0 ? "#ffffff" : p.c === 1 ? "#fff1a0" : "#ffd23f"; break;
+      case K.RAY: chr = p.o < 0.4 ? "+" : p.o < 0.75 ? "-" : "."; color = p.o < 0.5 ? "#ffe27a" : "#b89a33"; break;
+      case K.LIGHT: {
+        const v = Math.sin(t * 3 + p.j * 40), on = v > -0.2; if (on) litNow++;
+        chr = on ? "@" : "."; color = on ? LIGHT_COLORS[p.c] : "#223";
+        lc = on ? { c: LIGHT_COLORS[p.c], a: clamp((v + 0.2) / 1.0, 0.35, 1) } : null; break;
+      }
+    }
+    zb[idx] = d; chB[idx] = chr; coB[idx] = color; lightAt[idx] = lc;
+  }
+
+  /* ---- draw ---- */
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(bg, 0, 0);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.font = `${fs}px ${FONT_FAMILY}`; ctx.textBaseline = "top";
+
+  for (const f of flakes) {
+    f.y += f.v * dt * 3; if (f.y > 1) { f.y = 0; f.x = R(); }
+    const a = 0.35 + 0.65 * Math.abs(Math.sin(t * 1.5 + f.ph));
+    ctx.fillStyle = `rgba(255,255,255,${a.toFixed(2)})`;
+    ctx.fillText(f.c, Math.floor(f.x * cols) * cw, Math.floor(f.y * rows) * ch);
+  }
+  // soft coloured disc behind every visible bauble so each one reads as a sphere
+  ctx.globalCompositeOperation = "lighter";
+  for (const bb of BAUBLES) {
+    if (bb.o > pOrn) continue;
+    const bx = bb.x, xr = bx * c + bb.z * s, zr = -bx * s + bb.z * c, ry = bb.y - CY;
+    const yp = ry * CP + zr * SP, zp = zr * CP - ry * SP, d = DIST + zp, k = DIST / d * FOV;
+    const sx = ox + xr * k * S, sy = oy - yp * k * S, rad = bb.r * k * S * 1.25;
+    const ci = Math.floor(sx / cw) + Math.floor(sy / ch) * cols;
+    if (zb[ci] < d - bb.r - 0.35) continue;                       // hidden behind foliage
+    const g = ctx.createRadialGradient(sx - rad * 0.3, sy - rad * 0.3, 0, sx, sy, rad);
+    g.addColorStop(0, bb.col + "aa"); g.addColorStop(0.7, bb.col + "55"); g.addColorStop(1, bb.col + "00");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, rad, 0, TAU); ctx.fill();
+  }
+  ctx.globalCompositeOperation = "source-over";
+  let lastColor = null;
+  for (let i = 0; i < chB.length; i++) {
+    const g = chB[i]; if (!g) continue;
+    const col = coB[i]; if (col !== lastColor) { ctx.fillStyle = col; lastColor = col; }
+    ctx.fillText(g, (i % cols) * cw, ((i / cols) | 0) * ch); letters++;
+  }
+
+  // light bulbs: larger glowing dots on top of the glyphs
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = 0; i < lightAt.length; i++) {
+    const L = lightAt[i]; if (!L) continue;
+    const x = (i % cols) * cw + cw / 2, y = ((i / cols) | 0) * ch + ch / 2, R2 = cw * 2.6;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, R2);
+    g.addColorStop(0, "#ffffff"); g.addColorStop(0.18, L.c); g.addColorStop(0.45, L.c + "66"); g.addColorStop(1, L.c + "00");
+    ctx.globalAlpha = L.a; ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R2, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+
+  // wish written in stars: they fly out of the tree-top star and settle into the text
+  const tw = t - WISH_T;
+  if (tw > 0) {
+    const fade = 1, sx0 = W / 2, sy0 = oy - 3.3 * S;
+    ctx.globalCompositeOperation = "lighter";
+    for (const st of wish) {
+      const u = clamp((tw - st.d) / st.dur, 0, 1); if (u <= 0) continue;
+      const e = 1 - Math.pow(1 - u, 3), q = 1 - e;
+      const x = q * q * sx0 + 2 * q * e * st.cx + e * e * st.tx, y = q * q * sy0 + 2 * q * e * st.cy + e * e * st.ty;
+      const tw2 = 0.8 + 0.2 * Math.sin(t * 3 + st.ph), sz = st.sz * (u < 1 ? 0.9 : 0.9 + 0.3 * tw2);
+      ctx.globalAlpha = fade * (u < 1 ? 1 : 0.85 + 0.15 * tw2);
+      ctx.drawImage(SPR[st.ci], x - sz * 1.5, y - sz * 1.5, sz * 3, sz * 3);
+      if (st.big && u >= 1) {                       // four-point sparkle
+        ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 0.8; ctx.beginPath();
+        ctx.moveTo(x - sz * 2.4, y); ctx.lineTo(x + sz * 2.4, y); ctx.moveTo(x, y - sz * 2.4); ctx.lineTo(x, y + sz * 2.4); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+  }
+
+  // tree-top star: bright pulsing glow + lens flare
+  if (t > 11) {
+    const ry = 6.28 * VS - CY, yp = ry * CP, zp = -ry * SP, kk = DIST / (DIST + zp), gx = ox, gy = oy - yp * kk * S, U = S * kk;
+    const a = prog(11, 12.2), pulse = 0.88 + 0.12 * Math.sin(t * 3.2);
+    ctx.globalCompositeOperation = "lighter"; ctx.globalAlpha = a * 0.7;     // star glow at 70%
+    const halo = ctx.createRadialGradient(gx, gy, 0, gx, gy, U * 2.6 * pulse);
+    halo.addColorStop(0, "rgba(255,255,255,1)"); halo.addColorStop(0.12, "rgba(255,250,210,.95)");
+    halo.addColorStop(0.3, "rgba(255,215,90,.5)"); halo.addColorStop(0.6, "rgba(255,170,40,.14)"); halo.addColorStop(1, "rgba(255,150,0,0)");
+    ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(gx, gy, U * 2.6 * pulse, 0, TAU); ctx.fill();
+    ctx.lineCap = "round";
+    for (const [ang2, len, w, al] of [[0, 1.7, 1.6, 0.9], [Math.PI / 2, 1.7, 1.6, 0.9], [Math.PI / 4 + t * 0.25, 1.0, 1, 0.6], [-Math.PI / 4 + t * 0.25, 1.0, 1, 0.6]]) {
+      const L = U * len * pulse, dx = Math.cos(ang2) * L, dy = Math.sin(ang2) * L;
+      const lg = ctx.createLinearGradient(gx - dx, gy - dy, gx + dx, gy + dy);
+      lg.addColorStop(0, "rgba(255,240,170,0)"); lg.addColorStop(0.5, `rgba(255,255,240,${al})`); lg.addColorStop(1, "rgba(255,240,170,0)");
+      ctx.strokeStyle = lg; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(gx - dx, gy - dy); ctx.lineTo(gx + dx, gy + dy); ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+  }
+
+  /* ---- message (typewriter, letter-spaced) ---- */
+  const shown = clamp(Math.floor((t - 14.5) / 0.14), 0, MESSAGE.length);
+  const spaced = MESSAGE.split("").join(" ");
+  const mfs = Math.max(11, fs * 2), step = mfs * 1.15, my = H - 1.5 * (H * 0.075 - mfs) - mfs;     // message keeps a readable size
+  const mx = (W - (MESSAGE.length - 1) * step) / 2;
+  const flash = Math.sin(t * 5) > 0;
+  ctx.font = `bold ${mfs}px ${FONT_FAMILY}`;
+  for (let i = 0; i < shown; i++) {
+    ctx.fillStyle = i % 2 ? (flash ? "#2ee66b" : "#1aa84d") : (flash ? "#ff4040" : "#c92a2a");
+    ctx.fillText(MESSAGE[i], mx + i * step, my); letters++;
+  }
+  ctx.fillStyle = "#ffd23f"; if (t > 14.5 && shown < MESSAGE.length && Math.floor(t * 4) % 2) ctx.fillText("_", mx + shown * step, my);
+
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
